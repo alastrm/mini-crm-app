@@ -1,0 +1,92 @@
+@baseUrl = http://127.0.0.1:8000
+
+# VS Code REST Client: выполняйте запросы сверху вниз через Send Request.
+# ID берутся из ответов createCompany и createMeeting; сначала выполните их.
+# Менеджеры 1 и 2 создаются при запуске. Данные организации вымышлены.
+# Для повторного сценария измените БИН или запустите API с новым CRM_DB_PATH.
+
+### 1. Создать организацию — 201
+# @name createCompany
+POST {{baseUrl}}/companies
+Content-Type: application/json
+
+{
+  "name": "ТОО Алматы Снабжение",
+  "bin": "231140012345",
+  "phone": "+77011234567"
+}
+
+### 2. Назначить встречу: понедельник, 23 ноября 2026, 10:00 Almaty — 201
+# @name createMeeting
+POST {{baseUrl}}/meetings
+Content-Type: application/json
+
+{
+  "company_id": {{createCompany.response.body.$.id}},
+  "manager_id": 1,
+  "start_at": "2026-11-23T05:00:00Z"
+}
+
+### 3. Записать результат звонка со связанной встречей — 201
+POST {{baseUrl}}/calls
+Content-Type: application/json
+
+{
+  "company_id": {{createCompany.response.body.$.id}},
+  "result": "meeting_set",
+  "meeting_id": {{createMeeting.response.body.$.id}}
+}
+
+### 4. Список организаций с фильтром и пагинацией — 200
+GET {{baseUrl}}/companies?status=meeting_set&page=1&page_size=20
+
+### 5. Конфликт: та же организация, другой менеджер, 10:30 Almaty — 409
+POST {{baseUrl}}/meetings
+Content-Type: application/json
+
+{
+  "company_id": {{createCompany.response.body.$.id}},
+  "manager_id": 2,
+  "start_at": "2026-11-23T05:30:00Z"
+}
+
+### 6. Выход за рабочие часы: 17:30–18:30 Almaty — 422
+POST {{baseUrl}}/meetings
+Content-Type: application/json
+
+{
+  "company_id": {{createCompany.response.body.$.id}},
+  "manager_id": 1,
+  "start_at": "2026-11-23T12:30:00Z"
+}
+
+### 7. meeting_set без ссылки на встречу — 422
+POST {{baseUrl}}/calls
+Content-Type: application/json
+
+{
+  "company_id": {{createCompany.response.body.$.id}},
+  "result": "meeting_set"
+}
+
+### 8. Перенести встречу на 11:00 Almaty; original_start_at остаётся прежним — 200
+PATCH {{baseUrl}}/meetings/{{createMeeting.response.body.$.id}}
+Content-Type: application/json
+
+{
+  "start_at": "2026-11-23T06:00:00Z"
+}
+
+### 9. Расписание за местный день; время ответа — UTC — 200
+GET {{baseUrl}}/managers/1/schedule?date=2026-11-23
+
+### 10. Отменить встречу — 200
+PATCH {{baseUrl}}/meetings/{{createMeeting.response.body.$.id}}
+Content-Type: application/json
+
+{
+  "status": "cancelled"
+}
+
+### 11. Отменённая встреча больше не входит в расписание — 200
+GET {{baseUrl}}/managers/1/schedule?date=2026-11-23
