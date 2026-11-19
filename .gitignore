@@ -1,0 +1,36 @@
+# Local instructions and private task context: NEVER commit
+AGENTS.md
+CODEX_PROMPT.md
+START_HERE.txt
+.codex-local/
+
+# Python / local environment
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local databases
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+
+# Secrets and local configs
+.env
+.env.*
+!.env.example
+
+# Source assignments are local-only
+*.pdf
+
+# Editor and operating system
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
