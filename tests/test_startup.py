@@ -1,17 +1,9 @@
 import sqlite3
 from contextlib import closing
 
-import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
-
-
-@pytest.fixture
-def database_path(tmp_path, monkeypatch):
-    path = tmp_path / "test.sqlite3"
-    monkeypatch.setenv("CRM_DB_PATH", str(path))
-    return path
 
 
 def test_startup_creates_schema_and_opens_docs(database_path):
