@@ -25,3 +25,13 @@ def company(client):
     )
     assert response.status_code == 201
     return response.json()
+
+
+@pytest.fixture
+def meeting(client, company):
+    response = client.post(
+        "/meetings",
+        json={"company_id": company["id"], "manager_id": 1, "start_at": "2026-11-23T05:00:00Z"},
+    )
+    assert response.status_code == 201
+    return response.json()
