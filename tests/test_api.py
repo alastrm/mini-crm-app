@@ -1,3 +1,6 @@
+import sqlite3
+from contextlib import closing
+
 import pytest
 
 
@@ -163,8 +166,9 @@ def test_reschedule_preserves_original_and_created_at(client, meeting):
         assert updated["original_start_at"] == meeting["original_start_at"]
         assert updated["created_at"] == meeting["created_at"]
         assert updated["status"] == "scheduled"
+        assert updated["start_at"] == start_at.replace("+00:00", "Z")
     schedule = client.get("/managers/1/schedule", params={"date": "2026-11-23"}).json()
-    assert schedule[0]["start_at"] == "2026-11-23T07:00:00Z"
+    assert schedule == [updated]
 
 
 def test_cancel_hides_meeting_and_prevents_rescheduling(client, meeting):
@@ -178,7 +182,7 @@ def test_cancel_hides_meeting_and_prevents_rescheduling(client, meeting):
     assert client.patch(path, json={"start_at": "2026-11-23T06:00:00Z"}).status_code == 409
 
 
-def test_meeting_set_checks_company_and_active_status(client, company, meeting):
+def test_meeting_set_checks_company_and_active_status(client, company, meeting, database_path):
     payload = {"company_id": company["id"], "result": "meeting_set", "meeting_id": meeting["id"]}
     response = client.post("/calls", json=payload)
     assert response.status_code == 201
@@ -192,6 +196,39 @@ def test_meeting_set_checks_company_and_active_status(client, company, meeting):
     assert client.patch(f"/meetings/{meeting['id']}", json={"status": "cancelled"}).status_code == 200
     assert client.post("/calls", json=payload).status_code == 422
     assert client.get("/companies", params={"status": "meeting_set"}).json()["total"] == 1
+    assert client.get("/companies", params={"status": "new"}).json()["items"] == [other.json()]
+    with closing(sqlite3.connect(database_path)) as connection:
+        assert connection.execute("SELECT company_id, meeting_id FROM calls").fetchall() == [
+            (company["id"], meeting["id"])
+        ]
+
+
+def test_call_and_company_status_are_rolled_back_together(client, company, database_path):
+    # Fail after the call INSERT to test rollback of a partly executed transaction.
+    with closing(sqlite3.connect(database_path)) as connection:
+        connection.executescript("""
+            CREATE TRIGGER reject_status_update BEFORE UPDATE OF status ON companies
+            BEGIN
+                SELECT RAISE(ABORT, 'test: status update rejected');
+            END;
+        """)
+
+    payload = {"company_id": company["id"], "result": "refused"}
+    with pytest.raises(sqlite3.IntegrityError, match="test: status update rejected"):
+        client.post("/calls", json=payload)
+
+    with closing(sqlite3.connect(database_path)) as connection:
+        assert connection.execute("SELECT count(*) FROM calls").fetchone()[0] == 0
+        assert connection.execute("SELECT status FROM companies").fetchone()[0] == "new"
+        connection.execute("DROP TRIGGER reject_status_update")
+        connection.commit()
+
+    assert client.get("/companies").json()["items"] == [company]
+    response = client.post("/calls", json=payload)
+    assert response.status_code == 201
+    assert client.get("/companies").json()["items"][0]["status"] == "refused"
+    with closing(sqlite3.connect(database_path)) as connection:
+        assert connection.execute("SELECT count(*) FROM calls").fetchone()[0] == 1
 
 
 def test_refused_call_does_not_cancel_existing_meeting(client, company, meeting):

@@ -26,8 +26,14 @@ def test_working_hours_boundaries(client, company, start_at, expected_status):
         json={"company_id": company["id"], "manager_id": 1, "start_at": start_at},
     )
     assert response.status_code == expected_status
+    schedule = client.get("/managers/1/schedule", params={"date": start_at[:10]}).json()
     if expected_status == 422:
         assert response.json()["detail"]
+        assert schedule == []
+    else:
+        assert schedule == [response.json()]
+        assert schedule[0]["start_at"] == start_at
+        assert schedule[0]["original_start_at"] == start_at
 
 
 def test_manager_cannot_have_overlapping_meetings(client, other_company, meeting):
@@ -48,6 +54,7 @@ def test_company_cannot_overlap_even_with_different_managers(client, company, me
     assert response.status_code == 409
     assert "Company" in response.json()["detail"]
     assert client.get("/managers/2/schedule", params={"date": "2026-11-23"}).json() == []
+    assert client.get("/managers/1/schedule", params={"date": "2026-11-23"}).json() == [meeting]
 
 
 def test_adjacent_meetings_do_not_conflict(client, company, meeting):
@@ -57,7 +64,8 @@ def test_adjacent_meetings_do_not_conflict(client, company, meeting):
     )
     assert response.status_code == 201
     schedule = client.get("/managers/1/schedule", params={"date": "2026-11-23"}).json()
-    assert [row["id"] for row in schedule] == [meeting["id"], response.json()["id"]]
+    assert schedule == [meeting, response.json()]
+    assert schedule[1]["start_at"] == "2026-11-23T06:00:00Z"
 
 
 def test_distinct_companies_and_managers_can_meet_at_same_time(client, other_company, meeting):
@@ -82,15 +90,20 @@ def test_reschedule_checks_manager_and_company_conflicts(
     )
     assert response.status_code == 201
     original = response.json()
+    before = [
+        client.get(f"/managers/{manager_id}/schedule", params={"date": "2026-11-23"}).json()
+        for manager_id in [1, 2]
+    ]
     response = client.patch(
         f"/meetings/{original['id']}", json={"start_at": "2026-11-23T05:30:00Z"}
     )
     assert response.status_code == 409
     assert ("Company" if same_company else "Manager") in response.json()["detail"]
-    schedule = client.get(
-        f"/managers/{original['manager_id']}/schedule", params={"date": "2026-11-23"}
-    ).json()
-    assert original in schedule
+    after = [
+        client.get(f"/managers/{manager_id}/schedule", params={"date": "2026-11-23"}).json()
+        for manager_id in [1, 2]
+    ]
+    assert after == before
 
 
 def test_reschedule_ignores_its_own_old_slot(client, meeting):
@@ -140,6 +153,7 @@ def test_concurrent_requests_use_separate_connections_and_cannot_double_book(
     client, company, monkeypatch, action
 ):
     requests = []
+    originals = []
     for manager_id in [1, 2]:
         if action == "create":
             requests.append(("POST", "/meetings", {
@@ -152,6 +166,7 @@ def test_concurrent_requests_use_separate_connections_and_cannot_double_book(
                 "start_at": "2026-11-23T04:00:00Z" if manager_id == 1 else "2026-11-23T06:00:00Z",
             })
             assert response.status_code == 201
+            originals.append(response.json())
             requests.append(("PATCH", f"/meetings/{response.json()['id']}", {
                 "start_at": "2026-11-23T05:00:00Z",
             }))
@@ -180,6 +195,13 @@ def test_concurrent_requests_use_separate_connections_and_cannot_double_book(
         meetings.extend(client.get(f"/managers/{manager_id}/schedule", params={"date": "2026-11-23"}).json())
     assert sum(meeting["start_at"] == "2026-11-23T05:00:00Z" for meeting in meetings) == 1
     assert len(meetings) == (1 if action == "create" else 2)
+    successful = next(response.json() for response in responses if response.status_code < 300)
+    assert successful in meetings
+    for original in originals:
+        expected = original.copy()
+        if expected["id"] == successful["id"]:
+            expected["start_at"] = successful["start_at"]
+        assert expected in meetings
 
 
 def test_database_lock_returns_503_and_recovers(client, company, database_path):
@@ -193,4 +215,7 @@ def test_database_lock_returns_503_and_recovers(client, company, database_path):
     assert response.status_code == 503
     assert "busy" in response.json()["detail"].lower()
     assert response.headers["Retry-After"] == "1"
-    assert client.post("/meetings", json=payload).status_code == 201
+    assert client.get("/managers/1/schedule", params={"date": "2026-11-23"}).json() == []
+    retry = client.post("/meetings", json=payload)
+    assert retry.status_code == 201
+    assert client.get("/managers/1/schedule", params={"date": "2026-11-23"}).json() == [retry.json()]
