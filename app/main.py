@@ -1,11 +1,12 @@
 import sqlite3
 from contextlib import asynccontextmanager, closing
 from datetime import UTC, date as Date, datetime, time, timedelta
-from zoneinfo import ZoneInfo
 
-from fastapi import FastAPI, HTTPException, Path, Query
+from fastapi import FastAPI, HTTPException, Path, Query, Request
+from fastapi.responses import JSONResponse
 
 from app.db import get_connection, init_db
+from app.rules import ALMATY, check_overlaps, check_working_hours
 from app.schemas import (
     SQLITE_MAX_INTEGER,
     Call,
@@ -27,6 +28,17 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Mini CRM", lifespan=lifespan)
+
+
+@app.exception_handler(sqlite3.OperationalError)
+def handle_database_lock(request: Request, error: sqlite3.OperationalError):
+    if error.sqlite_errorname.startswith("SQLITE_BUSY") or error.sqlite_errorname.startswith("SQLITE_LOCKED"):
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "Database is busy. Please retry the request shortly."},
+            headers={"Retry-After": "1"},
+        )
+    raise error
 
 
 @app.post("/companies", response_model=Company, status_code=201)
@@ -76,6 +88,7 @@ def list_companies(
 def create_call(call: CallCreate):
     with closing(get_connection()) as connection:
         with connection:
+            connection.execute("BEGIN IMMEDIATE")
             company = connection.execute(
                 "SELECT id FROM companies WHERE id = ?", (call.company_id,)
             ).fetchone()
@@ -111,6 +124,7 @@ def create_meeting(meeting: MeetingCreate):
     start_at = meeting.start_at.isoformat(timespec="microseconds")
     with closing(get_connection()) as connection:
         with connection:
+            connection.execute("BEGIN IMMEDIATE")
             company = connection.execute(
                 "SELECT id FROM companies WHERE id = ?", (meeting.company_id,)
             ).fetchone()
@@ -121,6 +135,8 @@ def create_meeting(meeting: MeetingCreate):
             ).fetchone()
             if manager is None:
                 raise HTTPException(404, "Manager not found")
+            check_working_hours(meeting.start_at)
+            check_overlaps(connection, meeting.company_id, meeting.manager_id, meeting.start_at)
             cursor = connection.execute(
                 "INSERT INTO meetings "
                 "(company_id, manager_id, start_at, original_start_at, created_at) "
@@ -146,6 +162,7 @@ def update_meeting(
 ):
     with closing(get_connection()) as connection:
         with connection:
+            connection.execute("BEGIN IMMEDIATE")
             meeting = connection.execute(
                 "SELECT * FROM meetings WHERE id = ?", (id,)
             ).fetchone()
@@ -154,6 +171,10 @@ def update_meeting(
             if update.start_at is not None:
                 if meeting["status"] == "cancelled":
                     raise HTTPException(409, "Cancelled meetings cannot be rescheduled")
+                check_working_hours(update.start_at)
+                check_overlaps(
+                    connection, meeting["company_id"], meeting["manager_id"], update.start_at, id
+                )
                 connection.execute(
                     "UPDATE meetings SET start_at = ? WHERE id = ?",
                     (update.start_at.isoformat(timespec="microseconds"), id),
@@ -173,7 +194,7 @@ def get_schedule(
 ):
     try:
         day = Date.fromisoformat(date)
-        local_start = datetime.combine(day, time.min, tzinfo=ZoneInfo("Asia/Almaty"))
+        local_start = datetime.combine(day, time.min, tzinfo=ALMATY)
         start_at = local_start.astimezone(UTC).isoformat(timespec="microseconds")
         end_at = (local_start + timedelta(days=1)).astimezone(UTC).isoformat(timespec="microseconds")
     except (ValueError, OverflowError) as error:

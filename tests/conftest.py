@@ -28,6 +28,16 @@ def company(client):
 
 
 @pytest.fixture
+def other_company(client):
+    response = client.post(
+        "/companies",
+        json={"name": "Other company", "bin": "000000000002", "phone": "+77001234568"},
+    )
+    assert response.status_code == 201
+    return response.json()
+
+
+@pytest.fixture
 def meeting(client, company):
     response = client.post(
         "/meetings",
