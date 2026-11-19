@@ -1,11 +1,14 @@
 import sqlite3
 from contextlib import asynccontextmanager, closing
+from datetime import UTC, datetime
 
 from fastapi import FastAPI, HTTPException, Query
 
 from app.db import get_connection, init_db
 from app.schemas import (
     SQLITE_MAX_INTEGER,
+    Call,
+    CallCreate,
     Company,
     CompanyCreate,
     CompanyPage,
@@ -63,3 +66,37 @@ def list_companies(
         "page": page,
         "page_size": page_size,
     }
+
+
+@app.post("/calls", response_model=Call, status_code=201)
+def create_call(call: CallCreate):
+    with closing(get_connection()) as connection:
+        with connection:
+            company = connection.execute(
+                "SELECT id FROM companies WHERE id = ?", (call.company_id,)
+            ).fetchone()
+            if company is None:
+                raise HTTPException(404, "Company not found")
+            if call.result == "meeting_set":
+                meeting = connection.execute(
+                    "SELECT company_id, status FROM meetings WHERE id = ?",
+                    (call.meeting_id,),
+                ).fetchone()
+                if (
+                    meeting is None
+                    or meeting["company_id"] != call.company_id
+                    or meeting["status"] != "scheduled"
+                ):
+                    raise HTTPException(422, "meeting_id must reference an active meeting of this company")
+            cursor = connection.execute(
+                "INSERT INTO calls (company_id, result, meeting_id, created_at) VALUES (?, ?, ?, ?)",
+                (call.company_id, call.result, call.meeting_id, datetime.now(UTC).isoformat()),
+            )
+            connection.execute(
+                "UPDATE companies SET status = ? WHERE id = ?",
+                (call.result, call.company_id),
+            )
+            row = connection.execute(
+                "SELECT * FROM calls WHERE id = ?", (cursor.lastrowid,)
+            ).fetchone()
+    return dict(row)

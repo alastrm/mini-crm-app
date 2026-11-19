@@ -75,3 +75,56 @@ def test_company_name_with_sql_text_is_saved_as_data(client):
     assert response.status_code == 201
     assert response.json()["name"] == name
     assert client.get("/companies").json()["items"][0]["name"] == name
+
+
+def test_call_updates_company_status_and_filter(client, company):
+    response = client.post(
+        "/calls", json={"company_id": company["id"], "result": "no_answer"}
+    )
+    assert response.status_code == 201
+    call = response.json()
+    assert call["company_id"] == company["id"]
+    assert call["result"] == "no_answer"
+    assert call["meeting_id"] is None
+    assert call["created_at"].endswith("Z")
+    assert client.get("/companies", params={"status": "no_answer"}).json()["total"] == 1
+
+    response = client.post(
+        "/calls", json={"company_id": company["id"], "result": "refused"}
+    )
+    assert response.status_code == 201
+    assert response.json()["id"] != call["id"]
+    assert client.get("/companies", params={"status": "refused"}).json()["total"] == 1
+    assert client.get("/companies", params={"status": "no_answer"}).json()["total"] == 0
+
+
+def test_call_with_unknown_company_returns_not_found(client):
+    response = client.post("/calls", json={"company_id": 999, "result": "no_answer"})
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Company not found"
+
+
+def test_meeting_set_requires_an_existing_meeting(client, company):
+    payload = {"company_id": company["id"], "result": "meeting_set"}
+    assert client.post("/calls", json=payload).status_code == 422
+    payload["meeting_id"] = 999
+    assert client.post("/calls", json=payload).status_code == 422
+    assert client.get("/companies").json()["items"][0]["status"] == "new"
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"company_id": 0},
+        {"company_id": True},
+        {"company_id": 1.5},
+        {"company_id": 10**100},
+        {"result": "unknown"},
+        {"meeting_id": 1},
+        {"extra_field": "unexpected"},
+    ],
+)
+def test_invalid_call_is_rejected(client, company, changes):
+    payload = {"company_id": company["id"], "result": "no_answer"}
+    payload.update(changes)
+    assert client.post("/calls", json=payload).status_code == 422
